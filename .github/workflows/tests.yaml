@@ -1,19 +1,11 @@
 name: Tests
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  push:
-    branches:
-      - main
-      - "[0-9]+.[0-9]+"
-    paths:
-      - "**.py"
-      - Dockerfile
-      - "saleor/**"
-      - .github/workflows/tests.yaml
-      - pyproject.toml
-      - uv.lock
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runs-on label for every job
+        default: ubuntu-latest
 
 env:
   BENCH_PATH: ./queries-results.json
@@ -32,7 +24,7 @@ permissions: {}
 
 jobs:
   unit_tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     container: python:3.12
     name: Run unit tests
 
@@ -257,7 +249,7 @@ jobs:
     if: github.event_name == 'push' && github.repository == 'saleor/saleor'
 
     needs: [unit_tests]
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment: pytest-upload-django-db-queries
 
     permissions: {}
