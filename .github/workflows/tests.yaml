@@ -70,7 +70,7 @@ jobs:
       - name: Create the test databases
         run: |
           # one per xdist worker, as upstream's cached-DB path does
-          uv run pytest --reuse-db -m "not e2e" -n logical -q -p no:randomly saleor/core/tests/test_utils.py || true
+          uv run pytest --reuse-db -m "not e2e" -n logical -q -p no:randomly saleor/checkout/tests/test_checkout.py || true
           psql "$DATABASE_URL" -Atc "select datname from pg_database where datname like 'test_%'"
       - name: Plant a failing test
         if: inputs.plant == 'true'
