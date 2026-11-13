@@ -1,91 +1,44 @@
 name: Tests
 
-# Task 41 proof: the unit test suite sharded across forks of this job's
-# machine by zode-ci (one step, no matrix). shards=1 is the one-machine
-# baseline; plant=true adds a failing test.
+# Task 41.5: shards on forks with memory. The Postgres service keeps running
+# in each worker; the job's canary secret must be nowhere in a worker's RAM.
 on:
   workflow_dispatch:
     inputs:
       runner:
-        description: runs-on label for every job
-        default: zode-4x8
-      shards:
-        description: zode-ci --shards (1, a number or auto)
-        default: "1"
-      plant:
-        description: add a failing test
-        default: "false"
+        default: zode-2x4
       fork:
-        description: zode-ci --fork (disk or memory)
-        default: disk
+        default: memory
       hold:
-        description: seconds each shard waits before its tests (memory scan window)
-        default: "0"
-
-env:
-  CACHE_URL: "redis://cache:6379/0"
-  DATABASE_URL: "postgres://saleor:saleor@postgres:5432/saleor"
-  SECRET_KEY: ci-test
+        description: seconds each test waits (memory scan window)
+        default: "150"
 
 permissions: {}
 
 jobs:
-  unit_tests:
+  drill:
     runs-on: ${{ inputs.runner }}
-    container:
-      image: python:3.12
-      volumes:
-        - /usr/local/bin/zode-ci:/usr/local/bin/zode-ci
-        - /var/lib/zode-ci:/var/lib/zode-ci
-    name: Run unit tests
-    permissions:
-      contents: read
     services:
       postgres:
         image: library/postgres:15-alpine
         env:
-          POSTGRES_PASSWORD: saleor
-          POSTGRES_USER: saleor
+          POSTGRES_PASSWORD: drill
+        ports: ["5432:5432"]
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      cache:
-        image: valkey/valkey:8.1-alpine
-        options: >-
-          --health-cmd "valkey-cli ping | grep PONG"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install system dependencies
-        run: |
-          apt-get update
-          apt-get install -y libpq-dev postgresql-common
-          /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          apt-get install -y postgresql-client-15
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          enable-cache: false
-      - name: Install dependencies
-        run: uv sync --locked
-      - name: Create the test databases
-        run: |
-          # one per xdist worker, as upstream's cached-DB path does
-          uv run pytest --reuse-db -m "not e2e" -n logical -q -p no:randomly saleor/checkout/tests/test_checkout.py || true
-          psql "$DATABASE_URL" -Atc "select datname from pg_database where datname like 'test_%'"
       - name: Use the canary secret (a job secret no worker may hold)
         env:
           ZODE_CANARY: ${{ secrets.ZODE_CANARY }}
         run: test -n "$ZODE_CANARY" && echo "canary is set (${#ZODE_CANARY} chars)"
-      - name: Plant a failing test
-        if: inputs.plant == 'true'
-        run: printf 'def test_zode_planted_failure():\n    assert 1 == 2, "planted by the task 41 proof"\n' > saleor/core/tests/test_zode_planted.py
-      - name: Run unit tests
+      - name: A small Go suite
         run: |
-          if [ "${{ inputs.hold }}" != "0" ]; then export PYTEST_ADDOPTS="-p zode_hold" PYTHONPATH="$PWD"; printf 'import os, time\ndef pytest_configure(config):\n    if os.environ.get("ZODE_CI_SHARD"):\n        time.sleep(int("${{ inputs.hold }}"))\n' > zode_hold.py; fi
-          zode-ci test --shards "${{ inputs.shards }}" --fork "${{ inputs.fork }}" -- uv run pytest --reuse-db -m "not e2e" -n logical
+          mkdir -p drill && cd drill
+          printf 'module drill\n\ngo 1.21\n' > go.mod
+          for p in a b c; do
+            mkdir -p $p
+            printf 'package %s\n\nimport (\n\t"net"\n\t"os"\n\t"testing"\n\t"time"\n)\n\nfunc TestService(t *testing.T) {\n\tc, err := net.DialTimeout("tcp", "127.0.0.1:5432", 5*time.Second)\n\tif err != nil {\n\t\tt.Fatalf("postgres is not running here: %%v", err)\n\t}\n\tc.Close()\n\tt.Logf("shard %%s: postgres answers", os.Getenv("ZODE_CI_SHARD"))\n\ttime.Sleep(${{ inputs.hold }} * time.Second)\n}\n' $p > $p/${p}_test.go
+          done
+      - name: Sharded tests
+        working-directory: drill
+        run: zode-ci test --shards 3 --fork "${{ inputs.fork }}" -- go test -v ./...
