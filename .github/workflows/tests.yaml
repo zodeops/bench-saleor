@@ -15,6 +15,12 @@ on:
       plant:
         description: add a failing test
         default: "false"
+      fork:
+        description: zode-ci --fork (disk or memory)
+        default: disk
+      hold:
+        description: seconds each shard waits before its tests (memory scan window)
+        default: "0"
 
 env:
   CACHE_URL: "redis://cache:6379/0"
@@ -72,9 +78,14 @@ jobs:
           # one per xdist worker, as upstream's cached-DB path does
           uv run pytest --reuse-db -m "not e2e" -n logical -q -p no:randomly saleor/checkout/tests/test_checkout.py || true
           psql "$DATABASE_URL" -Atc "select datname from pg_database where datname like 'test_%'"
+      - name: Use the canary secret (a job secret no worker may hold)
+        env:
+          ZODE_CANARY: ${{ secrets.ZODE_CANARY }}
+        run: test -n "$ZODE_CANARY" && echo "canary is set (${#ZODE_CANARY} chars)"
       - name: Plant a failing test
         if: inputs.plant == 'true'
         run: printf 'def test_zode_planted_failure():\n    assert 1 == 2, "planted by the task 41 proof"\n' > saleor/core/tests/test_zode_planted.py
       - name: Run unit tests
         run: |
-          zode-ci test --shards "${{ inputs.shards }}" -- uv run pytest --reuse-db -m "not e2e" -n logical
+          if [ "${{ inputs.hold }}" != "0" ]; then export PYTEST_ADDOPTS="-p zode_hold" PYTHONPATH="$PWD"; printf 'import os, time\ndef pytest_configure(config):\n    if os.environ.get("ZODE_CI_SHARD"):\n        time.sleep(int("${{ inputs.hold }}"))\n' > zode_hold.py; fi
+          zode-ci test --shards "${{ inputs.shards }}" --fork "${{ inputs.fork }}" -- uv run pytest --reuse-db -m "not e2e" -n logical
